@@ -1,0 +1,1170 @@
+---
+title: "transition matrix code"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+## clear R environment
+
+```{r}
+rm(list = ls())
+```
+
+
+## loading packages
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(viridis)
+library(RColorBrewer)
+library(ggpubr)
+library(tidyr)
+library(egg)
+library(cowplot)
+library(scales)
+```
+
+## mathematical background
+
+The Negative Binomial distribution is given by:
+
+$$P (n_{t+1} = i | n_t=j) = \binom{i+\frac{j}{S}-1}{\frac{j}{S}-1}\bigg(\frac{\mu}{\frac{j}{S}+\mu}\bigg)^i
+\bigg(\frac{\frac{j}{S}}{\frac{j}{S}+\mu}\bigg)^\frac{j}{S}$$
+
+following Melbourne and Hastings (2008, Nature 454:100-103; Table S1), where S = 1/$k_D$.
+
+Here, $\mu$ is the expected population size at $N_{t+1}$ given that $N_t = i$, which is given here by the discrete-time Ricker equation when an Allee effect is present:
+
+$$\mu = N_{t+1} = N_t e ^ {r (1 - \frac{N_t} {K} - \frac {\beta} {b + {N_t}})}$$
+Here, the fraction $\frac{\beta}{b}$ gives the fractional reduction of the maximum per capita growth rate ($r$) as the population approaches zero individuals, and $b$ gives the population size at which this reduction falls to half its maximum. As with the regular Ricker equation, $\frac{1}{K}$ is the per capita competitive effect, but the carrying capacity may be notably lower than $K$ depending on the strength and attenuation of the Allee effect (explained below).
+
+The Ricker model with an Allee effect will have two equilibria. The larger of these equilibria is the carrying capacity, which will be smaller than K when $b$ and $\beta$ are sufficiently large and $K$ is sufficiently small. To avoid confusing this equilibrium and K, we name it the 'realized carrying capacity': 
+
+$$\hat{N} = \frac{K - b + K \sqrt{(1-b/K)^{2} + 4 \frac{(b-\beta)}{K}}}{2}$$
+The smaller equilibrium defines the Allee threshold. It is an unstable equilibrium, meaning it defines the population size at which the population growth rate switches from negative (at lower density) to positive at higher density:
+
+$$\hat{N} = \frac{K - b - K \sqrt{(1-b/K)^{2} + 4 \frac{(b-\beta)}{K}}}{2}$$
+
+## functions
+
+### 1. calculate equilibrium population (realized carrying capacity, termed Kexact) 
+
+```{r}
+get_Kexact<-function(Kapx, b, beta){
+    root<-(1-b/Kapx)^2+((4*(b-beta))/Kapx)
+    Kexact <-ifelse(root>0, ((Kapx-b+Kapx*sqrt(root))/2),0)
+    return(Kexact)
+}
+```
+
+### 2. calculate the Allee threshold (termed rcrit)
+
+```{r}
+get_rcrit<-function(Kapx, b, beta){
+    root<-(1-b/Kapx)^2+((4*(b-beta))/Kapx)
+    rcrit <-ifelse(root>0, ((Kapx-b-Kapx*sqrt(root))/2),0)
+  return(rcrit)
+}
+```
+
+### 3. create transition matrix 
+
+We use probabilities from negative binomial distribution and expected population size defined by discrete-time Ricker model with Allee effect. We account for rounding errors here by:
+1) rounding values less than 1e-10 down to 0
+2) when the probability of reaching a certain state (population size) is less than 1e-10, we truncate the transition matrix at that state and treat transition probabilities to higher states as negligible
+These steps (1 & 2) provide robust matrices with column sums equal to one (i.e. they obey the law of total probability)
+
+```{r} 
+build_tm <- function(Kapx, r, beta, b, init.size, Kexact) {
+  n <- 3*round(Kexact)+1 # setting matrix size much larger than Kexact to begin so that the cumulative probability of the neg binom approaches 1 going from 0 to n
+  transition.a <- data.frame(matrix(nrow=n,ncol=n)) # empty matrix
+  
+  # filling matrix, where each element (row,column) indicates the probability of going from a population of size (column) to a population of size (row). Note that the first column is for N_t = 1, and the first row is for N_(t+1)=0. We add in the row for N_t = 0 at the end, since it is an absorbing state (it can only transition to N_(t+1)=0)
+  i <- 1  
+  while(i < nrow(transition.a) - 1){  
+    pred <- i * exp(r*(1 - i/Kapx - beta/(b + i))) # predicted N(t+1) given N(t) = i
+    corrected.size <- i*init.size # init.size = 1/S (background, above). 'corrected.size' = N(t)/S
+    dist <- dnbinom(x=0:(n-1),size=corrected.size,mu=pred)
+    dist[dist < 1e-10] <- 0 # see note 1 above the code chunk
+    transition.a[,i] <- dist 
+    if ((sum(transition.a[i,], na.rm = TRUE) < 1e-10)) { # see note 2 above the code chunk
+      transition.a[,i]<-NA
+      i<-1000000}
+    i<-i+1
+    }
+   
+  X0<-c(1,rep(0,(n-1)))
+  transition.a <- cbind(X0,transition.a)
+  
+  cutoff <- which(is.na(transition.a[2,])) # check where the loop was broken
+  transition.a <- transition.a[-cutoff,-cutoff] # truncate the matrix at the cutoff value
+  
+  return(transition.a)
+}
+```
+
+### 4. truncate the transition matrix to calculate probability of reaching a given population size (by treating that population size as an absorbing state)
+
+```{r}
+trunc_matrix <- function(trm, trunc.N) {
+  
+  trunc.N<-round(trunc.N) # ensure the given population size to reach (Kexact or rcrit) is an integer
+
+  trm[(trunc.N+1),] <- as.vector(colSums(trm[(trunc.N+1):nrow(trm),])) # make the last row the probability of reaching K or higher
+  trm <- trm[1:(trunc.N+1),1:(trunc.N+1)] 
+  trm[,(trunc.N+1)] <- c(rep(0,trunc.N),1)  # filling last col with [0 0 0 ... 1] to reflect absorbing state at population size trunc.N or higher
+  return(trm)
+}
+```
+
+### 5. calculating probability of absorption to the upper absorbing state 
+- with option to calculate from 1 to rcrit, rcrit to Kexact, or 1 to Kexact
+- include calculations with stochatic immigration added
+
+```{r}
+p_abs <- function(tm,rcrit) {
+
+  rcrit<-round(rcrit)
+  prob.absorb.raw <- eigen(t(tm))$vectors # gives the left eigenvectors of tm
+  
+  # computation to calculate probabilities from the eigenvectors (probabilities have to add up to 1), then extract probabilities of reaching Kexact when starting at 1 individual or just above rcrit
+  prob.absorb <- as.data.frame(prob.absorb.raw) %>% 
+    mutate(X1 = Re(V1)/Re(V1+V2),
+           X2 = Re(V2)/Re(V1+V2)) %>% 
+    select(X1,X2)
+  p.colonization.from.one<-prob.absorb[2,2] # prob reaching upper absorbing state from 1 individual arriving
+  
+  ## calculations with added stochastic dispersal
+  Kexact <- ncol(tm)-1
+  poiss <- dpois(0:(Kexact-1),lambda=1) # average number of immigrants = 1
+  poiss[Kexact+1] <- 1-sum(poiss) # ensuring last element includes prob of that element and all greater values
+  poiss[poiss < 1e-10] <- 0 # eliminate rounding errors
+  p.colonization <- prob.absorb[,2]
+  if ((rcrit > 2.5)) { # round(rcrit) must be at least 3 for multiple arrivals)
+    poiss.imm <- sum(poiss*p.colonization)
+  } else {
+    poiss.imm <- NA
+  }
+  
+  ## calculations for colonization to rcrit and from rcrit to Kexact
+  if ((rcrit+3)> nrow(tm)) { # case when rcrit is close to K
+    p.colonization.from.rcrit<-NA
+    p.colonization.to.rcrit<-p.colonization.from.one
+    p.absorb=data.frame(p.colonization.to.rcrit)
+  } else {
+  p.colonization.from.rcrit<-prob.absorb[(round(rcrit)+2),2]  # prob reaching Kexact from a population just larger than rcrit
+  p.absorb<-data.frame(p.colonization.from.one,poiss.imm,p.colonization.from.rcrit)
+  }
+
+  return(p.absorb)
+}
+```
+
+### 6. calculating time to to extinction (the lower absorbing state)
+- with option to calculate from Kexact to 0 or rcrit to 0
+
+```{r}
+t_abs <- function(tm,Kexact,rcrit) {
+  
+  # formula for time to absorption: T_u = T_u M_u + b_u
+  tm.u <- tm[2:nrow(tm),2:nrow(tm)] # transition matrix with the absorbing state removed
+  b.u <- c(rep(1,ncol(tm.u))) # this is b_u - vector containing 1 for every non-absorbing state 
+  
+  # rearrange formula and solve for T_u --> T_u = b_u (I - M_u)^-1 
+  identity <- diag(ncol(tm.u)) # this is I - identity matrix with same dimensions as tm.u
+  t.u <- b.u %*% solve(identity - tm.u,tol = 1e-24) # tol sets number of decimal points, increasing size of matrix we can analyze
+  #t.u now gives mean times to extinctions from population size of 1 (element 1) to n (element n)
+  t.extinction.from.Kexact<-t.u[round(Kexact)] # time to extinction from Kexact
+  t.extinction.from.rcrit<-t.u[floor(rcrit)] # time to extinction from just below rcrit
+  
+  t.abs<-data.frame(t.extinction.from.Kexact,t.extinction.from.rcrit) 
+  
+  return(t.abs)
+}
+```
+
+## example transition matrices
+
+```{r}
+Kexact <- get_Kexact(Kapx=100, beta=12, b=8) 
+rcrit <- get_rcrit(Kapx=100, beta=12, b=8)
+
+tm.a <- build_tm(Kapx=100, r=1, beta=12, b=8,init.size=1, Kexact=Kexact)
+
+tm.Kexact <- trunc_matrix(trm=tm.a, trunc.N=Kexact)
+tm.rcrit <- trunc_matrix(trm=tm.a, trunc.N=rcrit)
+
+p.abs.K<-p_abs(tm.Kexact,rcrit=rcrit)
+p.abs.K
+
+p.abs.r<-p_abs(tm.rcrit,rcrit=rcrit)
+p.abs.r
+
+t.abs<-t_abs(tm.a,Kexact,rcrit)
+1/t.abs
+```
+
+## evaluate and compile results across parameter sets
+
+### results for single immigrant (main results)
+```{r}
+get_results <- function(parms) {
+  for (i in 1:nrow(parms)){
+    
+  # 1. building the transition matrices
+  trm<- build_tm(Kapx=parms$Kapx[i], r=parms$r[i], beta=parms$beta[i], b=parms$b[i],
+                init.size=parms$init.size[i], Kexact=parms$Kexact[i])
+  
+  tm.Kexact <- trunc_matrix(trm=trm, trunc.N=parms$Kexact[i])
+  tm.rcrit <- trunc_matrix(trm=trm, trunc.N=parms$rcrit[i])
+
+  # 2. calculating probabilities of colonization and times to extinction
+  p.abs.K<-p_abs(tm.Kexact,rcrit=parms$rcrit[i])
+  p.abs.r<-p_abs(tm.rcrit,rcrit=parms$rcrit[i])
+  t.abs<-t_abs(trm,parms$Kexact[i],parms$rcrit[i])
+
+  # 3. combine the data
+  datai<-data.frame(parms[i,],p.abs.K,p.abs.r,t.abs) 
+  if (i==1) {
+     results<-datai
+    } else {
+    results <- rbind(results,datai)
+    }
+  print(paste(i/nrow(parms),Sys.time())) #assessing time for sims
+  }
+return(results)
+}
+```
+
+
+### results for set of parameters
+```{r}
+# OPTION 1: only testing over parameters used for main body text
+Kapx <- c(50,100,150) 
+r <- c(0.5,1,1.5)
+b <- c(1:10)
+x <- c(1.5,2) # used to generate beta so that the invasion growth rate = (x-1)/x; x = strength of allee effect
+init.size <- c(1/2,1,2,4,8) 
+
+# OPTION 2: expanded range of parameters
+#Kapx <- c(25,50,75,100,150,200,250) 
+#r <- 1
+#b <- c(1:10)
+#x <- c(1.5,2,2.5,3) # used to generate beta so that the invasion growth rate = (x-1)/x; x = strength of allee effect
+#init.size <- c(1/2,1,2,4,8) 
+
+parms <- expand.grid(Kapx=Kapx,r=r,b=b,x=x,init.size=init.size) %>% 
+  mutate(beta = b*x) %>% 
+  select(Kapx,r,b,beta,init.size) %>% 
+  mutate(Kexact = get_Kexact(Kapx, b, beta),
+         rcrit=get_rcrit(Kapx, b, beta)) %>% 
+  filter(rcrit>2)   # only include scenarios where a single invader has an expected negative growth rate and a positive Kexact (both conditions met by this cut-off)
+
+main.results <- get_results(parms=parms) 
+# 1 minute for range in main body text, ~5-10 mins for expanded range
+write.csv(main.results, "allee effects and stochasticity main results.csv", row.names=F)
+```
+
+###############################################################################
+
+## main text figures
+
+### data prep
+
+```{r}
+main.results <- read.csv("allee effects and stochasticity main results.csv") 
+Allee.names <- function(x){
+  x<-as.factor(x)
+  names<-c("Moderate Allee Effect","Large Allee Effect")
+  return(names[x])
+}
+
+# initial data prep
+d.Kexact <- main.results %>% 
+  filter(rcrit > 2, r == 1) %>% 
+  mutate(ds.strength = 1/init.size,
+         allee.size = beta/b,
+         allee.strength = Allee.names(allee.size),
+         t.col = 1/p.colonization.from.one,
+         t.ext = t.extinction.from.Kexact,
+         Colonization = p.colonization.from.one,
+         Extinction = 1/t.extinction.from.Kexact,
+         mu = exp(r*(1-1/Kapx - beta/(b + 1)))) %>% 
+  select(-c(init.size,p.colonization.from.rcrit,p.colonization.to.rcrit,
+          t.extinction.from.rcrit))
+
+# for fig. 2a: examples of zones, subsetting for one case
+d.fig2a <- d.Kexact %>% 
+  filter(b == 8 & allee.size == 2 & Kapx == 150 & ds.strength<3) %>% 
+  pivot_longer(cols=c(Colonization,Extinction),
+               names_to = "vital_rate",values_to = "ce_prob")
+
+# for fig. 2b: zones where DS is essential for persistence
+d.fig2b <- d.Kexact %>% 
+  mutate(Kapx=as.factor(Kapx))%>% 
+  select(Kapx, Kexact, b, beta, allee.strength, allee.size,ds.strength, 
+         t.col, t.ext) %>% 
+  filter(allee.size==1.5|allee.size==2) %>% 
+  filter(ds.strength == 0.125 | ds.strength == 2) %>%
+  pivot_wider(., names_from = ds.strength, 
+              values_from = c(t.col, t.ext)) %>% 
+ filter(t.col_2 < t.col_0.125) %>% # identify when col takes shorter time at greater stochasticity
+  mutate(zone.size = t.ext_2 - t.col_0.125) %>%
+  filter(zone.size > 0) %>% # identify when col is always higher than ext
+  filter(Kapx == 50 | Kapx == 100 | Kapx == 150)
+
+# for fig. 2c: zones where DS is beneficial for persistence
+d.fig2c <- d.fig2b %>% 
+  mutate(zone.size = t.ext_2 - t.col_0.125) %>% 
+  filter(zone.size > 0) 
+
+# for fig. 3: b vs. p.colonization and t.extinction
+d.fig3 <- d.Kexact %>%
+  filter(Kapx == 50 | Kapx == 100 | Kapx == 150) %>% 
+  filter(allee.size == 2)
+d.fig3$Kapx <- factor(d.fig3$Kapx, levels = c(50,100,150),
+                      labels = c("K = 50","K = 100","K = 150"))
+
+# for fig. 4: stochastic immigration
+d.fig4 <- na.omit(d.Kexact) %>% 
+  pivot_longer(cols = p.colonization.from.one:poiss.imm,
+               names_to = "distribution", values_to = "col.prob") %>% 
+  filter(distribution == "poiss.imm" | distribution == "p.colonization.from.one") %>% 
+  filter(beta/b == 2) %>% 
+  filter(Kapx == 50 | Kapx == 100 |Kapx == 150) %>% 
+  filter(ds.strength == 0.125 | ds.strength == 2) %>% 
+  mutate(S = as.factor(ds.strength),
+         Immigration = ifelse(distribution == "poiss.imm", "Variable immigration", "Constant Immigration"),
+         K_lab = paste("K =",Kapx))
+
+```
+
+### stochasticity colour palette prep
+
+```{r}
+my.colours <- viridis(9,option = "magma")
+my.colours <- my.colours[4:8] # total 5 levels of stochasticity
+show_col(my.colours)
+```
+
+### fig. 1 - conceptual figure
+
+#### calculations for fig. 1a
+
+```{r}
+# Allee effect threshold
+threshold <- function(beta,b,r,K){
+  lower.equ <- 0.5*(K-b - sqrt(K^2+b^2+2*K*b-(4*K*beta)))
+  return(lower.equ)
+}
+
+# expected per capita growth rate from Allee effect model
+Allee.pc.model<-function(beta,b,r,K){
+  out<-data.frame(N=1:K) %>% 
+    mutate(pc.growth=exp(r*(1-N/K-beta/(b+N))),
+           beta=beta,b=b,r=r,K=K)
+  return(out)
+}
+
+beta <- 12
+b <- 6
+r <- 1
+K <- 50
+
+# calculating values of the Allee effect model using example parameter values
+d.fig1a <- Allee.pc.model(beta=beta, b=b, r=r, K=K) 
+```
+
+#### fig. 1a - population growth under the Allee effect
+
+```{r}
+fig1a <- ggplot(d.fig1a)+
+  geom_line(aes(x = N, y = pc.growth), linewidth = 1, colour = "black")+
+  geom_hline(yintercept=1,linetype="dashed")+
+  geom_vline(xintercept=threshold(beta=12,b=6,r=1,K=50), colour="red")+
+  ylab("Expected per capita growth rate,\nN(t+1) / N(t)")+
+  xlab("Population size, N(t)")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        legend.position = "top",panel.background = element_rect(colour = "black"))
+
+fig1a
+```
+
+#### generating probability distributions for fig. 1b
+
+```{r}
+# here we set expected multiplicative growth rate to 0.5, which is approximately correct for the parameters used in fig. 1a (large K, b>5, beta = 2*b - large Allee effect)
+compare.dists<-data.frame(N=0:20,expected=rep(0.5,21)) %>% 
+  mutate(Pois=dpois(N,lambda=expected),
+         X.125=dnbinom(N,mu=expected,size=1/0.125),
+         X.25=dnbinom(N,mu=expected,size=1/0.25),
+         X.5=dnbinom(N,mu=expected,size=1/0.5),
+         X1=dnbinom(N,mu=expected,size=1),
+         X2=dnbinom(N,mu=expected,size=1/2))%>% 
+  pivot_longer(Pois:X2,names_to="distribution",values_to = "probability")
+```
+
+#### fig. 1b - probabilities of transitioning to N_t+1 from N_t (pois, x.125, x2 only)
+
+``` {r}
+# main graph
+plot.data<-compare.dists
+X.125.plot.data<-plot.data[plot.data$distribution=="X.125",]
+X2.plot.data<-plot.data[plot.data$distribution=="X2",]
+
+fig1bmain <- ggplot()+
+  geom_col(aes(x=X2.plot.data$N,y=X2.plot.data$probability, color='X2', fill='X2'), alpha=0.5)+
+  geom_col(aes(x=X.125.plot.data$N,y=X.125.plot.data$probability, color='X.125', fill='X.125'), alpha=0.5)+
+  scale_colour_manual(name='Distribution',
+                      breaks=c('X.125', 'X2'),
+                      values=c('X.125'=my.colours[1], 'X2'=my.colours[5]),
+                      labels=c('X.125'="Low Stochasticity", 'X2'="High Stochasticity"))+
+  scale_fill_manual(name='Distribution',
+                    breaks=c('X.125', 'X2'),
+                    values=c('X.125'=my.colours[1], 'X2'=my.colours[5]),
+                      labels=c('X.125'="Low Stochasticity", 'X2'="High Stochasticity"))+
+  xlab(label="N")+
+  ylab(label="Probability of N")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        legend.position = "right",panel.background = element_rect(colour = "black"))
+
+fig1bmain
+
+# inset graph
+plot.data.b2<-filter(compare.dists,N>(threshold(beta=beta,b=b,r=r,K=K)-1))
+X.125.plot.data.b2<-plot.data.b2[plot.data.b2$distribution=="X.125",]
+X2.plot.data.b2<-plot.data.b2[plot.data.b2$distribution=="X2",]
+
+fig1binset <- ggplot()+
+  geom_col(aes(x=X2.plot.data.b2$N,y=X2.plot.data.b2$probability, color='X2', fill='X2'), alpha=0.5)+
+  geom_col(aes(x=X.125.plot.data.b2$N,y=X.125.plot.data.b2$probability, color='X.125', fill='X.125'), alpha=0.5)+
+  scale_colour_manual(name='Distribution',
+                      breaks=c('X.125', 'X2'),
+                      values=c('X.125'=my.colours[1], 'X2'=my.colours[5]),
+                      labels=c('X.125'="Low Stochasticity", 'X2'="High Stochasticity"))+
+  scale_fill_manual(name='Distribution',
+                    breaks=c('X.125', 'X2'),
+                    values=c('X.125'=my.colours[1], 'X2'=my.colours[5]),
+                      labels=c('X.125'="Low Stochasticity", 'X2'="High Stochasticity"))+
+  ## with legend:
+  #theme(legend.title=element_text(size=20),
+  #      legend.text=element_text(size=14))+
+  guides(col="none")+
+  xlab(label="")+
+  ylab(label="")+
+  ylim(-0.0001,0.0006)+
+  scale_x_continuous(breaks = c(10,15,20))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        legend.position = "none",panel.background = element_rect(colour = "black"))
+
+fig1binset
+
+# full plot
+fig1b <- fig1bmain + 
+  annotation_custom(
+    ggplotGrob(fig1binset),
+    xmin=2.2, xmax=21.25, ymin=0.05, ymax=0.73
+  ) +
+  geom_vline(xintercept = threshold(beta=beta,b=b,r=r,K=K), colour="red")
+
+fig1b
+```
+
+#### combining panels into one figure (will need to manually align so that red line goes to the right of N = 8)
+
+```{r}
+ggarrange(fig1a, fig1b, ncol = 2, labels = c("A","B"))
+```
+         
+
+### fig. 2 - zones and time ranges
+
+#### fig. 2a - examples of zones
+
+```{r}
+fig2a <- ggplot(d.fig2a)+
+  geom_point(aes(x = ds.strength, y = ce_prob, shape = vital_rate), size = 3)+
+  geom_hline(yintercept = 1/327874302, linetype = "dashed")+
+  geom_hline(yintercept = 0.0001088166, linetype = "dashed")+
+  scale_shape_discrete(name = element_blank())+
+  scale_y_continuous(name = "Probability", trans = "log10",
+                     breaks = c(1e-11,1e-9,1e-7,1e-5,1e-3))+
+  xlab("Strength of Demographic Stochasticity (S)")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        legend.position = "top",panel.background = element_rect(colour = "black"))
+  
+fig2a
+```
+
+#### fig. 2b - waiting time to catastrophic extinction where low-stochasticity populations cannot persist
+
+```{r}
+fig2b <- ggplot(d.fig2b)+
+  geom_ribbon(aes(x = b, ymin = t.col_0.125, ymax = t.col_2, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  scale_y_continuous(trans = "log10", name = "Catastrophic Extinction Return\nTimes Where Demographic\nStochasticity is Critical")+
+  xlab("Attenuation point (b)")+
+  scale_fill_manual(values = c("olivedrab4","olivedrab3","olivedrab2"),
+                    name = "K")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+              scales = "free")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),legend.position = "right",text=element_text(size=14),
+        panel.background = element_rect(colour = "black"))
+
+fig2b
+```
+
+#### fig. 2c - size of zone where higher stochasticity is beneficial for population persistence
+
+```{r}
+fig2c <- ggplot(d.fig2c)+
+  geom_ribbon(aes(x = b, ymin = t.ext_2, ymax = t.col_0.125, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  #geom_pointrange(aes(x = b, ymin = t.absorb_2, ymax = t.col_0.125))+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans = "log10", 
+                     name = "Catastrophic Extinction Return\nTimes Where Demographic\nStochasticity is Critical",
+                     breaks = c(1e+02,1e+04,1e+06,1e+08,1e+10))+
+  xlab("Attenuation point (b)")+
+  scale_fill_manual(values = c("darkgoldenrod3","darkgoldenrod2","darkgoldenrod1"),
+                    name = "K")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+             scales = "free")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),legend.position = "right",text=element_text(size=14),
+        panel.background = element_rect(colour = "black"))
+
+fig2c
+```
+
+### fig. 3 - b vs. p.col and t.ext
+
+#### fig. 3a - b vs. colonization
+
+```{r}
+fig3a <- ggplot(d.fig3)+
+  geom_point(aes(x = b, y = Colonization, colour = factor(ds.strength)))+
+  geom_smooth(aes(x = b, y = Colonization, colour = factor(ds.strength)),
+              se = FALSE)+
+  scale_y_continuous(trans = "log10",
+                     name = "Probability of Colonization")+
+  scale_x_continuous(breaks = c(2,4,6,8,10))+
+  scale_colour_manual(name='Strength of Demographic Stochasticity',
+                    breaks=c(0.125,0.25,0.5,1,2),
+                    values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
+  facet_grid(~Kapx)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text=element_text(size=11),
+        axis.text.x = element_blank(), axis.title.x = element_blank(),
+        strip.background = element_rect(fill = "white"))
+
+fig3a
+```
+
+#### fig. 3b - b vs. extinction
+
+```{r}
+fig3b <- ggplot(d.fig3)+
+  geom_point(aes(x = b, y = t.ext, colour = factor(ds.strength)))+
+  geom_smooth(aes(x = b, y = t.ext, colour = factor(ds.strength)),
+              se = FALSE)+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans = "log10",
+                     name = "Time to Extinction")+
+  scale_x_continuous(breaks = c(2,4,6,8,10),
+                     name = "Attenuation point (b)")+
+  scale_colour_manual(name='Strength of Demographic Stochasticity',
+                    breaks=c(0.125,0.25,0.5,1,2),
+                    values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
+  facet_grid(~Kapx)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "none", axis.line = element_line(colour = "black"),
+        text=element_text(size=11),
+        strip.text = element_blank())
+
+fig3b
+```
+
+#### combining panels into one figure
+
+```{r}
+ggarrange(fig3a, fig3b, ncol = 1, labels = c("A","B"))
+```
+
+### fig. 4 - stochastic immigration
+
+```{r}
+ggplot(d.fig4, aes(x=b,y=col.prob,colour=S,by=Immigration)) +
+  geom_point()+
+  geom_line(aes(linetype=Immigration))+
+  scale_y_continuous(trans="log10",
+                     name = "Probability of Colonization")+
+  xlab("Attenuation point (b)")+
+  scale_colour_discrete(name='Strength of Demographic Stochasticity',
+                    type = my.colours[c(1,5)])+
+  facet_grid(~fct_relevel(K_lab, "K = 50","K = 100","K = 150"))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text = element_text(size=11), legend.direction = "vertical",
+        strip.background = element_rect(fill = "white"))
+```
+
+###############################################################################
+
+## supplementary figures (data prep within each subheading)
+
+```{r}
+supp.results <- read.csv("allee effects and stochasticity main results more parms.csv")
+
+# initial data prep
+d.Kexact.supp <- supp.results %>% 
+  filter(rcrit>2) %>% 
+  mutate(ds.strength = 1/init.size,
+         allee.size = beta/b,
+         allee.strength = Allee.names(allee.size),
+         t.col = 1/p.colonization.from.one,
+         t.ext = t.extinction.from.Kexact,
+         Colonization = p.colonization.from.one,
+         Extinction = 1/t.extinction.from.Kexact,
+         mu = exp(r*(1-1/Kapx - beta/(b + 1)))) %>% 
+  select(-c(init.size,p.colonization.from.rcrit,p.colonization.to.rcrit,
+          t.extinction.from.rcrit))
+```
+
+
+### fig. S1 - behaviour of Allee effect model
+
+```{r}
+# expected per capita growth rate from Allee effect model
+Allee.pc.model<-function(beta,b,r,K){
+  out<-data.frame(N=1:K) %>% 
+    mutate(pc.growth=exp(r*(1-N/K-beta/(b+N))),
+           beta=beta,b=b,r=r,K=K)
+  return(out)
+}
+
+b <- 6
+r <- 1
+K <- 50
+
+# calculating values of the Allee effect model using example parameter values
+d.noallee <- Allee.pc.model(beta=0, b=b, r=r, K=K)
+d.beta2 <- Allee.pc.model(beta=2, b=b, r=r, K=K)
+d.beta4 <- Allee.pc.model(beta=4, b=b, r=r, K=K) 
+d.beta6 <- Allee.pc.model(beta=6, b=b, r=r, K=K) 
+d.beta8 <- Allee.pc.model(beta=8, b=b, r=r, K=K)
+d.beta10 <- Allee.pc.model(beta=10, b=b, r=r, K=K)
+
+
+d.figs1 <- rbind(d.beta2, d.beta4, d.beta6, d.beta8, d.beta10, d.noallee) %>% 
+  mutate(allee.size = round(beta/b, digits = 2),
+         allee.threshold = 0.5*(K-b - sqrt(K^2+b^2+2*K*b-(4*K*beta))))
+
+d.figs1$allee.size <- factor(d.figs1$allee.size, 
+                             levels = c(0, 0.33, 0.67, 1, 1.33, 1.67),
+                             labels = c("No Allee effect", "0.33", "0.67",
+                                        "1.00", "1.33", "1.67"))
+```
+
+```{r}
+ggplot(d.figs1)+
+  geom_line(aes(x = N, y = pc.growth, colour = factor(allee.size)))+
+  geom_hline(yintercept = 1,linetype="dashed")+
+  geom_vline(xintercept = 2.404082, linetype = "dashed", colour = "#7AD151FF")+
+  geom_vline(xintercept = 5.147700, linetype = "dashed", colour = "#FDE725FF")+
+  scale_colour_viridis(discrete = TRUE, name = "Allee strength\n(beta/b)")+
+  ylab("Expected per capita growth rate,\nN(t+1) / N(t)")+
+  xlab("Population size, N(t)")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        panel.background = element_rect(colour = "black"))
+```
+
+### fig. S2 - Allee thresholds at different b values
+
+```{r}
+figs2main <- ggplot(d.Kexact)+
+  geom_point(aes(x = b, y = rcrit, colour = factor(Kapx), shape = factor(allee.size)))+
+  scale_colour_viridis(discrete = T, name = "K")+
+  scale_shape(name = "Allee effect strength",
+                     breaks = c(1.5, 2),
+                     labels = c("Moderate", "Large"))+
+  labs(x = "Attenuation point (b)", 
+       y = "Allee threshold")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+
+figs2inset <- ggplot(d.Kexact)+
+  geom_point(aes(x = b, y = rcrit, colour = factor(Kapx), shape = factor(allee.size)))+
+  scale_colour_viridis(discrete = T, name = "K")+
+  scale_shape(name = "Allee effect strength",
+                     breaks = c(1.5, 2),
+                     labels = c("Moderate", "Large"))+
+  xlim(2,5)+
+  scale_y_continuous(breaks = c(2, 3, 4), limits = c(2, 4))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.title = element_blank(),
+        axis.line = element_line(colour = "black"), legend.position = "none",
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+
+figs2 <- figs2main + 
+  annotation_custom(
+    ggplotGrob(figs7inset),
+    xmin=1.75, xmax=5.75, ymin=8, ymax=15)
+
+figs2
+```
+
+
+### fig. S3 - waiting times to extinction across all parameter values
+
+```{r}
+ggplot(d.Kexact.supp)+
+  geom_point(aes(x=Kexact,y=t.extinction.from.Kexact,colour=factor(ds.strength)),alpha=0.5)+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans= "log10",
+                     name = "Time to Extinction from Kexact")+
+  scale_colour_manual(values=my.colours, 
+                      name = "Strength of Demographic Stochasticity")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+```
+
+### fig. S4 - best colonization
+
+```{r}
+# determining which level of colonization provides the greatest colonization probability
+best.colonization <- supp.results %>% 
+  mutate(mu=r*(1-1/Kapx-beta/(b+1)),
+         allee.size=beta/b,
+         ds.strength=1/init.size) %>% 
+  select(Kapx,r,b,beta,rcrit,p.colonization.from.one,mu,ds.strength,allee.size) %>% 
+  group_by(Kapx,r,b,beta,rcrit,mu,allee.size) %>%
+  mutate(max.col.prob=max(p.colonization.from.one)) %>% 
+  ungroup() %>% 
+  filter(p.colonization.from.one==max.col.prob) %>% 
+  select(-max.col.prob) %>% 
+  mutate(ds.ordered=factor(ds.strength,ordered=T))
+```
+
+```{r}
+ggplot(best.colonization)+
+  geom_point(aes(x=rcrit,color=ds.ordered,y=mu), alpha = 0.5)+
+  scale_x_continuous(trans = "log2",
+                     name = "Allee threshold")+
+  scale_colour_manual(values=my.colours, name = "Best DS Strength")+
+  ylab("Expected Growth Rate for Single Individual (N[t+1]/N[t]")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+```
+
+### fig. S5 - prbabilities of colonization for multiple immigrants below the Allee threshold
+
+```{r}
+p_abs_mult_immigrants <- function(tm,rcrit) {
+
+  rcrit<-round(rcrit)
+  # as in p_abs function:
+  prob.absorb.raw <- eigen(t(tm))$vectors # left eigenvectors of tm
+  
+  prob.absorb <- as.data.frame(prob.absorb.raw) %>% 
+    mutate(X1 = Re(V1)/Re(V1+V2),
+           X2 = Re(V2)/Re(V1+V2)) %>% 
+    select(X1,X2)
+  p.colonization<-prob.absorb[2:rcrit,2] # prob reaching upper absorbing state from 1 individual arriving to (rcrit-1) individual arriving
+  return(p.colonization)
+}
+```
+
+```{r}
+get_results_multiple_immigrants <- function(parms) {
+  parms<-parms %>% 
+    filter(rcrit>2.5) # round(rcrit) must be at least 3
+
+  for (i in 1:nrow(parms)){
+  
+  # 1. building the transition matrix
+  trm<- build_tm(Kapx=parms$Kapx[i], r=parms$r[i], beta=parms$beta[i], b=parms$b[i],
+                init.size=parms$init.size[i], Kexact=parms$Kexact[i])
+  
+  tm.Kexact <- trunc_matrix(trm=trm, trunc.N=parms$Kexact[i])
+  
+  # 2. calculating probabilities of colonization
+  p.establish <- p_abs_mult_immigrants (tm.Kexact,rcrit=parms$rcrit[i])
+  datai<-data.frame(p.establish) %>% 
+    rownames_to_column(var="number.immigrants") %>% 
+    bind_cols(.,data.frame(parms[i,]))
+  if (i==1) {
+     results<-datai
+    } else {
+    results <- bind_rows(results,datai)
+    }
+  #print(paste(i,i/nrow(parms),Sys.time())) #assessing time for sims
+  }
+  return(results)
+}
+
+multiple.immigrants.results<-get_results_multiple_immigrants(parms)
+write.csv(multiple.immigrants.results,"allee effects and stochasticity supplementary results probability of colonization for one or more immigrants.csv",row.names=F)
+```
+
+```{r}
+multiple.immigrants.results<-read.csv("allee effects and stochasticity supplementary results probability of colonization for one or more immigrants.csv")
+
+immigration<-multiple.immigrants.results %>% 
+  filter(init.size==max(init.size)) %>% #take lowest dem. stochasticity case for comparison
+  mutate(base.colonization=p.establish) %>% 
+  select(-c(p.establish,init.size) )%>% 
+  right_join(multiple.immigrants.results) %>% 
+  mutate(number.immigrants=as.numeric(number.immigrants),
+         ds.strength = 1/init.size,
+         allee.strength = beta/b,
+         mu=number.immigrants*exp(r*(1-number.immigrants/Kapx - beta/(b + number.immigrants))),
+         log.ratio=log(p.establish/base.colonization)) %>% 
+  mutate(ds.strength=as.factor(ds.strength),
+         blab = paste("b =", b),
+         Klab = paste("K =", Kapx))
+
+immigration$blab <- factor(immigration$blab, 
+                           levels = c("b = 1","b = 2", "b = 3", "b = 4", "b = 5",
+                                      "b = 6", "b = 7", "b = 8", "b = 9", "b = 10"))
+immigration$Klab <- factor(immigration$Klab,
+                           levels = c("K = 25","K = 50","K = 75","K = 100",
+                                      "K = 150","K = 200","K = 250"))
+```
+
+```{r}
+### number of immigrants (smooth) vs. log ratio of colonization probability for high vs. low DS
+ggplot(immigration)+
+  geom_smooth(aes(x = number.immigrants, y = log.ratio, colour = ds.strength), se = F)+
+  xlab("Number of Immigrants")+
+  ylab("Log ratio of colonization probability for a\ngiven DS strength compared to DS Strength = 0.125")+
+  scale_colour_manual(values=my.colours, name = "DS Strength")+
+  theme_bw()+
+  facet_grid(blab~Klab, scales = "free")+
+  guides(colour = guide_legend(nrow = 1))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+```
+
+### fig. S6 - comparing size of zones with and without stochastic dispersal
+
+```{r}
+d.figs6 <- na.omit(d.Kexact.supp) %>% 
+  mutate(Kapx=as.factor(Kapx),
+         t.col.poiss = 1/poiss.imm) %>% 
+  select(Kapx, Kexact, b, beta, allee.strength, allee.size,ds.strength, 
+         t.ext, t.col.poiss) %>% 
+  filter(ds.strength == 0.125 | ds.strength == 2) %>% 
+  pivot_wider(., names_from = ds.strength, 
+              values_from = c(t.ext,t.col.poiss)) %>% 
+  filter(t.col.poiss_2 < t.col.poiss_0.125) %>%  # identify when col takes shorter time at greater stochasticity
+  mutate(zone.size = t.ext_2 - t.col.poiss_0.125) %>%
+  filter(zone.size > 0) %>% # identify when col is always higher than ext
+  filter(Kapx == 50 | Kapx == 100 | Kapx == 150)
+```
+
+#### a) critical, no dispersal
+
+```{r}
+figs6a <- ggplot(d.fig2b)+
+  geom_ribbon(aes(x = b, ymin = t.col_0.125, ymax = t.col_2, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  scale_y_continuous(trans = "log10", name = "Critical for Persistence")+
+  scale_fill_manual(values = c("olivedrab4","olivedrab3","olivedrab2"),
+                    guide = "none")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+              scales = "free")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        axis.text.x = element_blank(), axis.title.x = element_blank(),
+        panel.background = element_rect(colour = "black"))
+
+figs6a
+```
+
+#### b) beneficial, no dispersal
+
+```{r}
+figs6b <- ggplot(d.fig2c)+
+  geom_ribbon(aes(x = b, ymin = t.ext_2, ymax = t.col_0.125, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans = "log10", 
+                     name = "Beneficial for Persistence",
+                     breaks = c(1e+02,1e+04,1e+06,1e+08,1e+10))+
+  xlab("Attenuation point (b)")+
+  scale_fill_manual(values = c("darkgoldenrod3","darkgoldenrod2","darkgoldenrod1"),
+                    guide = "none")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+             scales = "free")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.text = element_blank(),text=element_text(size=14),
+        panel.background = element_rect(colour = "black"))
+
+figs6b
+```
+
+#### c) critical, with dispersal
+
+```{r}
+figs6c <- ggplot(d.figs6)+
+  geom_ribbon(aes(x = b, ymin = t.col.poiss_0.125, ymax = t.col.poiss_2, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  scale_y_continuous(trans = "log10")+
+  scale_fill_manual(values = c("olivedrab4","olivedrab3","olivedrab2"),
+                    name = "K")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+              scales = "free")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        axis.text.x = element_blank(), axis.title.x = element_blank(),
+        panel.background = element_rect(colour = "black"))
+
+figs6c
+```
+
+#### d) beneficial, with dispersal
+
+```{r}
+figs6d <- ggplot(d.figs6)+
+  geom_ribbon(aes(x = b, ymin = t.ext_2, ymax = t.col.poiss_0.125, 
+                  fill = factor(Kapx)), alpha = 0.5)+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans = "log10", 
+                     breaks = c(1e+02,1e+04,1e+06,1e+08,1e+10))+
+  xlab("Attenuation point (b)")+
+  scale_fill_manual(values = c("darkgoldenrod3","darkgoldenrod2","darkgoldenrod1"),
+                    name = "K")+
+  facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
+             scales = "free")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.text = element_blank(),text=element_text(size=14),
+        panel.background = element_rect(colour = "black",fill = "white"))
+
+figs6d
+```
+
+#### combining panels into one figure
+
+```{r}
+figs6ab <- annotate_figure(ggarrange(figs6a, figs6b, ncol = 1, labels = c("A","B")),
+                           top = "Without Variable Immigration")
+
+figs6cd <- annotate_figure(ggarrange(figs6c, figs6d, ncol = 1, labels = c("C","D")),
+                           top = "With Variable Immigration")
+
+figs6 <- annotate_figure(ggarrange(figs6ab, figs6cd, ncol = 2, widths = c(0.9,1)),
+                          left = "Catastrophic Extinction Return Times Where Demographic Stochasticity is:")
+
+figs6
+```
+
+### fig. S7 - probability of colonization to Allee threshold vs. upper equilibrium
+
+```{r}
+ggplot(supp.results)+
+  geom_point(aes(y=p.colonization.from.one,x=p.colonization.to.rcrit, colour = factor(Kapx)))+
+  geom_smooth(aes(y=p.colonization.from.one,x=p.colonization.to.rcrit, colour = factor(Kapx)), 
+              method = "lm", se = FALSE)+
+  scale_colour_viridis(option = "turbo", discrete = T, name = "K")+
+  labs(x = "Probability of colonization to Allee threshold", 
+       y = "Probability of colonization to Kexact")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text = element_text(size=11), strip.background = element_rect(fill = "white"))
+```
+
+### fig. S8 - other values of r
+
+```{r}
+d.figs8 <- main.results %>% 
+  filter(rcrit > 2, r != 1) %>% 
+  mutate(ds.strength = 1/init.size,
+         allee.size = beta/b,
+         allee.strength = Allee.names(allee.size),
+         t.col = 1/p.colonization.from.one,
+         t.ext = t.extinction.from.Kexact,
+         Colonization = p.colonization.from.one,
+         Extinction = 1/t.extinction.from.Kexact,
+         mu = exp(r*(1-1/Kapx - beta/(b + 1)))) %>% 
+  select(-c(init.size,p.colonization.from.rcrit,p.colonization.to.rcrit,
+          t.extinction.from.rcrit)) %>% 
+  filter(Kapx == 50 | Kapx == 100 | Kapx == 150) %>% 
+  filter(allee.size == 2)
+d.figs8$Kapx <- factor(d.figs6$Kapx, levels = c(50,100,150),
+                      labels = c("K = 50","K = 100","K = 150"))
+d.figs8$r <- factor(d.figs6$r, levels = c(0.5,1.5),
+                    labels = c("r = 0.5","r = 1.5"))
+```
+
+```{r}
+figs8a <- ggplot(d.figs8)+
+  geom_point(aes(x = b, y = Colonization, colour = factor(ds.strength)))+
+  geom_smooth(aes(x = b, y = Colonization, colour = factor(ds.strength)),
+              se = FALSE)+
+  scale_y_continuous(trans = "log10",
+                     name = "Probability of Colonization")+
+  scale_x_continuous(breaks = c(2,4,6,8,10))+
+  scale_colour_manual(name='Strength of Demographic Stochasticity',
+                    breaks=c(0.125,0.25,0.5,1,2),
+                    values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
+  facet_grid(r~Kapx)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "top", axis.line = element_line(colour = "black"),
+        text=element_text(size=11),
+        axis.text.x = element_blank(), axis.title.x = element_blank(),
+        strip.background = element_rect(fill = "white"))
+
+figs8a
+```
+
+```{r}
+figs8b <- ggplot(d.figs8)+
+  geom_point(aes(x = b, y = t.ext, colour = factor(ds.strength)))+
+  geom_smooth(aes(x = b, y = t.ext, colour = factor(ds.strength)),
+              se = FALSE)+
+  geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
+  geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
+  geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
+  scale_y_continuous(trans = "log10",
+                     name = "Time to Extinction")+
+  scale_x_continuous(breaks = c(2,4,6,8,10),
+                     name = "Attenuation point (b)")+
+  scale_colour_manual(name='Strength of Demographic Stochasticity',
+                    breaks=c(0.125,0.25,0.5,1,2),
+                    values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
+  facet_grid(r~Kapx)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        legend.position = "none", axis.line = element_line(colour = "black"),
+        text=element_text(size=11),
+        strip.background = element_rect(fill = "white"))
+
+figs8b
+```
+
+#### combining panels into one figure
+
+```{r}
+ggarrange(figs8a, figs8b, ncol = 1, labels = c("A","B"))
+```
+
+### fig. S9 - other forms of stochasticity
+
+Using a binomial distribution; for N individuals, probability of 1 female, 2 females, etc., assuming an equal sex ratio in all cases.
+```{r}
+#in what follows, males assigned 0, females 1
+dbinom(x=1,size=2,prob=0.5)
+dbinom(x=0,size=2,prob=0.5)
+dbinom(x=2,size=2,prob=0.5)
+dbinom(x=1,size=3,prob=0.5)+dnbinom(x=2,size=2,prob=0.5)
+dbinom(x=1,size=4,prob=0.5)+dnbinom(x=2,size=4,prob=0.5)
+
+any.male<-data.frame(N=2:20,success=NA,pc_repro=NA,pc_var=NA)
+for (i in 2:20){
+  sum.prob<-0
+  for (j in 1:i){
+    sum.prob<-sum.prob+dbinom(x=(j-1),size=i,prob=0.5)*(j-1)/i
+  }
+  any.male$success[i-1]<-sum.prob
+}
+#variation in growth rate with R=2 and no density dependence other than Allee effect
+for (i in 2:20){
+  var.repo<-0
+  any.male$pc_repro[i-1]<-2*any.male$success[i-1]
+  for (j in 1:i){
+    var.repo<-var.repo+((any.male$pc_repro[i-1]-2*dbinom(x=(j-1),size=i,prob=0.5)*(j-1)/i)^2)*dbinom(x=(j-1),size=i,prob=0.5)
+  }
+  any.male$pc_var[i-1]<-var.repo+((any.male$pc_repro[i-1]-0)^2)*dbinom(x=(i),size=i,prob=0.5) #the probability of another zero, not included in the mean since it adds zero
+}
+
+ggplot(any.male)+
+  geom_point(aes(x=N,y=sqrt(pc_var)),colour="blue")+
+  geom_point(aes(x=N,y=pc_repro))
+
+
+monogamous<-data.frame(N=2:20,success=NA,pc_repro=NA,pc_var=NA)
+#with purely monogamous the number of mating pairs is set by the minimum(males,females) for any population,
+#with a maximum occuring at half the population size
+for (i in 2:20){
+  sum.prob<-0
+  limiting.number<-floor(i/2)
+  for (j in 1:i){
+    num.pairs=ifelse((j-1)>limiting.number,i-(j-1),(j-1) )
+    sum.prob<-sum.prob+dbinom(x=(num.pairs),size=i,prob=0.5)*(num.pairs)/i
+  }
+  monogamous$success[i-1]<-sum.prob
+}
+
+for (i in 2:20){
+  var.repo<-0
+  monogamous$pc_repro[i-1]<-2*monogamous$success[i-1]
+#  sum.prob<-0
+  limiting.number<-floor(i/2)
+  for (j in 1:i){
+    num.pairs=ifelse((j-1)>limiting.number,i-(j-1),(j-1) )
+    var.repo<-var.repo+((monogamous$pc_repro[i-1]-2*dbinom(x=(num.pairs),size=i,prob=0.5)*(num.pairs)/i)^2)*dbinom(x=(num.pairs),size=i,prob=0.5)
+  }
+  monogamous$pc_var[i-1]<-var.repo+((monogamous$pc_repro[i-1]-0)^2)*dbinom(x=(i),size=i,prob=0.5) #the probability of another zero, not included in the mean since it adds zero
+}
+
+mate.limitation<-any.male %>% 
+  mutate(limitation="any.male") %>% 
+  bind_rows(mutate(monogamous,limitation="monogamous")) %>% 
+  mutate(Allee=1-2*success,
+         monod=ifelse(limitation=="any.male",0.5/(1+N-2),8/(16+N-2)))
+
+ggplot(mate.limitation)+
+  geom_point(aes(x=N,y=sqrt(pc_var),colour=limitation),shape="square")+
+  geom_line(aes(x=N,y=sqrt(pc_var),colour=limitation),linetype="dashed")+
+  geom_point(aes(x=N,y=pc_repro,colour=limitation))+
+  geom_line(aes(x=N,y=pc_repro,colour=limitation))+
+  theme_classic()+
+  labs(x="Population size (N)",y="Per capita rates")+
+  scale_colour_discrete(name="Mate limitation",
+                        breaks=c("any.male", "monogamous"),
+                        labels=c("Single male", "Monogamous"))
+```
