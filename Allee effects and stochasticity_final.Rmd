@@ -20,6 +20,7 @@ library(vegan)
 library(viridis)
 library(RColorBrewer)
 library(ggpubr)
+library(ggtext)
 library(tidyr)
 library(egg)
 library(cowplot)
@@ -336,7 +337,7 @@ d.fig4 <- na.omit(d.Kexact) %>%
   filter(Kapx == 50 | Kapx == 100 |Kapx == 150) %>% 
   filter(ds.strength == 0.125 | ds.strength == 2) %>% 
   mutate(S = as.factor(ds.strength),
-         Immigration = ifelse(distribution == "poiss.imm", "Variable immigration", "Constant Immigration"),
+         Immigration = ifelse(distribution == "poiss.imm", "Variable Immigration", "Constant Immigration"),
          K_lab = paste("K =",Kapx))
 
 ```
@@ -384,12 +385,13 @@ fig1a <- ggplot(d.fig1a)+
   geom_line(aes(x = N, y = pc.growth), linewidth = 1, colour = "black")+
   geom_hline(yintercept=1,linetype="dashed")+
   geom_vline(xintercept=threshold(beta=12,b=6,r=1,K=50), colour="red")+
-  ylab("Expected per capita growth rate,\nN(t+1) / N(t)")+
-  xlab("Population size, N(t)")+
+  ylab("Expected per capita growth rate, <br> *N(t+1) / N(t)*")+
+  xlab("Population size, *N(t)*")+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),text=element_text(size=14),
-        legend.position = "top",panel.background = element_rect(colour = "black"))
+        strip.background = element_rect(fill="white"),
+        legend.position = "top",panel.background = element_rect(colour = "black"),
+        axis.title.y = element_markdown(), axis.title.x = element_markdown())
 
 fig1a
 ```
@@ -427,12 +429,13 @@ fig1bmain <- ggplot()+
                     breaks=c('X.125', 'X2'),
                     values=c('X.125'=my.colours[1], 'X2'=my.colours[5]),
                       labels=c('X.125'="Low Stochasticity", 'X2'="High Stochasticity"))+
-  xlab(label="N")+
-  ylab(label="Probability of N")+
+  xlab(label="*N*")+
+  ylab(label="Probability of *N*")+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),text=element_text(size=14),
-        legend.position = "right",panel.background = element_rect(colour = "black"))
+        strip.background = element_rect(fill="white"),
+        legend.position = "right",panel.background = element_rect(colour = "black"),
+        axis.title.y = element_markdown(), axis.title.x = element_markdown())
 
 fig1bmain
 
@@ -462,7 +465,7 @@ fig1binset <- ggplot()+
   scale_x_continuous(breaks = c(10,15,20))+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),text=element_text(size=14),
+        strip.background = element_rect(fill="white"),
         legend.position = "none",panel.background = element_rect(colour = "black"))
 
 fig1binset
@@ -481,7 +484,8 @@ fig1b
 #### combining panels into one figure (will need to manually align so that red line goes to the right of N = 8)
 
 ```{r}
-ggarrange(fig1a, fig1b, ncol = 2, labels = c("A","B"))
+fig1 <- ggarrange(fig1a, fig1b, ncol = 2, labels = c("A","B"))
+ggsave(filename = "fig1.pdf", plot = fig1, width = 9.4, height = 3, useDingbats = FALSE)
 ```
          
 
@@ -497,11 +501,12 @@ fig2a <- ggplot(d.fig2a)+
   scale_shape_discrete(name = element_blank())+
   scale_y_continuous(name = "Probability", trans = "log10",
                      breaks = c(1e-11,1e-9,1e-7,1e-5,1e-3))+
-  xlab("Strength of Demographic Stochasticity (S)")+
+  xlab("Strength of Demographic Stochasticity, *S*")+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),text=element_text(size=14),
-        legend.position = "top",panel.background = element_rect(colour = "black"))
+        strip.background = element_rect(fill="white"),legend.key = element_rect(fill = NA, color = NA),
+        legend.position = "top",panel.background = element_rect(colour = "black"),
+        axis.title.y = element_markdown(), axis.title.x = element_markdown())
   
 fig2a
 ```
@@ -511,17 +516,20 @@ fig2a
 ```{r}
 fig2b <- ggplot(d.fig2b)+
   geom_ribbon(aes(x = b, ymin = t.col_0.125, ymax = t.col_2, 
-                  fill = factor(Kapx)), alpha = 0.5)+
-  scale_y_continuous(trans = "log10", name = "Catastrophic Extinction Return\nTimes Where Demographic\nStochasticity is Critical")+
-  xlab("Attenuation point (b)")+
+                  fill = factor(Kapx), alpha = 0.5))+
+  scale_y_continuous(trans = "log10", name = "Catastrophic Extinction Return <br> Times Where Demographic <br> Stochasticity is Critical")+
+  xlab("Attenuation point, *b*")+
   scale_fill_manual(values = c("olivedrab4","olivedrab3","olivedrab2"),
-                    name = "K")+
+                    name = "*K*")+
   facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
               scales = "free")+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),legend.position = "right",text=element_text(size=14),
-        panel.background = element_rect(colour = "black"))
+        strip.background = element_rect(fill="white"),legend.position = "right",
+        panel.background = element_rect(colour = "black"),
+        axis.title.y = element_markdown(), axis.title.x = element_markdown(),
+        legend.title = element_markdown())+
+  scale_alpha(guide = "none")
 
 fig2b
 ```
@@ -531,26 +539,36 @@ fig2b
 ```{r}
 fig2c <- ggplot(d.fig2c)+
   geom_ribbon(aes(x = b, ymin = t.ext_2, ymax = t.col_0.125, 
-                  fill = factor(Kapx)), alpha = 0.5)+
+                  fill = factor(Kapx), alpha = 0.5))+
   #geom_pointrange(aes(x = b, ymin = t.absorb_2, ymax = t.col_0.125))+
   geom_hline(yintercept = 252000000, linetype = "dashed")+ # line showing time since end-permian mass extinction
   geom_hline(yintercept = 66000000, linetype = "dashed")+ # line showing time since K/Pg extinction
   geom_hline(yintercept = 11700, linetype = "dashed")+ # line showing time since start of holocene
   scale_y_continuous(trans = "log10", 
-                     name = "Catastrophic Extinction Return\nTimes Where Demographic\nStochasticity is Critical",
+                     name = "Catastrophic Extinction Return <br> Times Where Demographic <br> Stochasticity is Beneficial",
                      breaks = c(1e+02,1e+04,1e+06,1e+08,1e+10))+
-  xlab("Attenuation point (b)")+
+  xlab("Attenuation point, *b*")+
   scale_fill_manual(values = c("darkgoldenrod3","darkgoldenrod2","darkgoldenrod1"),
-                    name = "K")+
+                    name = "*K*")+
   facet_grid(~fct_relevel(allee.strength,"Moderate Allee Effect","Large Allee Effect"), 
              scales = "free")+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        strip.background = element_rect(fill="white"),legend.position = "right",text=element_text(size=14),
-        panel.background = element_rect(colour = "black"))
+        strip.background = element_rect(fill="white"),legend.position = "right",
+        panel.background = element_rect(colour = "black"),
+        axis.title.y = element_markdown(), axis.title.x = element_markdown(),
+        legend.title = element_markdown())+
+  scale_alpha(guide = "none")
 
 fig2c
 ```
+
+```{r}
+ggsave(filename = "fig2a.pdf", plot = fig2a, width = 4, height = 6, useDingbats = FALSE)
+ggsave(filename = "fig2b.pdf", plot = fig2b, width = 6, height = 3, useDingbats = FALSE)
+ggsave(filename = "fig2c.pdf", plot = fig2c, width = 6, height = 3, useDingbats = FALSE)
+```
+
 
 ### fig. 3 - b vs. p.col and t.ext
 
@@ -564,16 +582,16 @@ fig3a <- ggplot(d.fig3)+
   scale_y_continuous(trans = "log10",
                      name = "Probability of Colonization")+
   scale_x_continuous(breaks = c(2,4,6,8,10))+
-  scale_colour_manual(name='Strength of Demographic Stochasticity',
+  scale_colour_manual(name='Strength of Demographic Stochasticity, *S*',
                     breaks=c(0.125,0.25,0.5,1,2),
                     values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
   facet_grid(~Kapx)+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
         legend.position = "top", axis.line = element_line(colour = "black"),
-        text=element_text(size=11),
         axis.text.x = element_blank(), axis.title.x = element_blank(),
-        strip.background = element_rect(fill = "white"))
+        strip.background = element_rect(fill = "white"),
+        legend.title = element_markdown())
 
 fig3a
 ```
@@ -591,7 +609,7 @@ fig3b <- ggplot(d.fig3)+
   scale_y_continuous(trans = "log10",
                      name = "Time to Extinction")+
   scale_x_continuous(breaks = c(2,4,6,8,10),
-                     name = "Attenuation point (b)")+
+                     name = "Attenuation point, *b*")+
   scale_colour_manual(name='Strength of Demographic Stochasticity',
                     breaks=c(0.125,0.25,0.5,1,2),
                     values=c('0.125' = my.colours[1],'0.25' = my.colours[2],'0.5' = my.colours[3],'1' = my.colours[4],'2' = my.colours[5]))+
@@ -599,8 +617,7 @@ fig3b <- ggplot(d.fig3)+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
         legend.position = "none", axis.line = element_line(colour = "black"),
-        text=element_text(size=11),
-        strip.text = element_blank())
+        strip.text = element_blank(), axis.title.x = element_markdown())
 
 fig3b
 ```
@@ -608,26 +625,33 @@ fig3b
 #### combining panels into one figure
 
 ```{r}
-ggarrange(fig3a, fig3b, ncol = 1, labels = c("A","B"))
+fig3 <- ggarrange(fig3a, fig3b, ncol = 1, labels = c("A","B"))
+ggsave(filename = "fig3.pdf", plot = fig3, width = 9, height = 6, useDingbats = FALSE)
 ```
 
 ### fig. 4 - stochastic immigration
 
 ```{r}
-ggplot(d.fig4, aes(x=b,y=col.prob,colour=S,by=Immigration)) +
-  geom_point()+
+fig4 <- ggplot(d.fig4, aes(x=b,y=col.prob,colour=S,by=Immigration)) +
   geom_line(aes(linetype=Immigration))+
+  geom_point()+
   scale_y_continuous(trans="log10",
                      name = "Probability of Colonization")+
-  xlab("Attenuation point (b)")+
-  scale_colour_discrete(name='Strength of Demographic Stochasticity',
+  xlab("Attenuation point, *b*")+
+  scale_colour_discrete(name='Strength of Demographic Stochasticity, *S*',
                     type = my.colours[c(1,5)])+
   facet_grid(~fct_relevel(K_lab, "K = 50","K = 100","K = 150"))+
   theme_bw()+
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
         legend.position = "top", axis.line = element_line(colour = "black"),
         text = element_text(size=11), legend.direction = "vertical",
-        strip.background = element_rect(fill = "white"))
+        strip.background = element_rect(fill = "white"),
+        legend.title = element_markdown(), axis.title.x = element_markdown())+
+  guides(linetype = guide_legend(nrow = 1), colour = guide_legend(nrow = 1))
+
+fig4
+
+ggsave(filename = "fig4.pdf", plot = fig4, width = 9, height = 3.5, useDingbats = FALSE)
 ```
 
 ###############################################################################
